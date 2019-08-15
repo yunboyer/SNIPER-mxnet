@@ -31,7 +31,25 @@ from ..model import BatchEndParam
 from ..initializer import Uniform
 from ..io import DataDesc
 from ..base import _as_list
+import pickle
+import pdb
+import sys
 
+
+
+sys.path.insert(0, '/home/yboyer/repos/SNIPER/lib/iterators/')
+from MNIteratorTest import MNIteratorTest
+
+# sys.path.insert(0, '/home/yboyer/repos/SNIPER/')
+# sys.path.insert(0, '/home/yboyer/repos/')
+# import init
+# import mxnet
+# import pdb; pdb.set_trace()
+import validate
+
+
+
+# from symbols.faster import *
 
 def _check_input_names(symbol, names, typename, throw):
     """Check that all input names are in symbol's arguments."""
@@ -46,7 +64,7 @@ def _check_input_names(symbol, names, typename, throw):
                       not arg.endswith('_beta')]
         msg = "\033[91mYou created Module with Module(..., %s_names=%s) but " \
               "input with name '%s' is not found in symbol.list_arguments(). " \
-              "Did you mean one of:\n\t%s\033[0m"%(
+              "Did you mean one of:\n\t%s\033[0m" % (
                   typename, str(names), name, '\n\t'.join(candidates))
         if throw:
             raise ValueError(msg)
@@ -56,9 +74,10 @@ def _check_input_names(symbol, names, typename, throw):
 
 def _check_names_match(data_names, data_shapes, name, throw):
     """Check that input names matches input data descriptors."""
+    #pdb.set_trace()
     actual = [x[0] for x in data_shapes]
     if sorted(data_names) != sorted(actual):
-        msg = "Data provided by %s_shapes don't match names specified by %s_names (%s vs. %s)"%(
+        msg = "Data provided by %s_shapes don't match names specified by %s_names (%s vs. %s)" % (
             name, name, str(data_shapes), str(data_names))
         if throw:
             raise ValueError(msg)
@@ -70,6 +89,7 @@ def _parse_data_desc(data_names, label_names, data_shapes, label_shapes):
     """parse data_attrs into DataDesc format and check that names match"""
     data_shapes = [x if isinstance(x, DataDesc) else DataDesc(*x) for x in data_shapes]
     _check_names_match(data_names, data_shapes, 'data', True)
+    #pdb.set_trace()
     if label_shapes is not None:
         label_shapes = [x if isinstance(x, DataDesc) else DataDesc(*x) for x in label_shapes]
         _check_names_match(label_names, label_shapes, 'label', False)
@@ -175,6 +195,7 @@ class BaseModule(object):
     >>> out  = mx.symbol.SoftmaxOutput(fc3, name = 'softmax')
     >>> mod = mx.mod.Module(out)
     """
+
     def __init__(self, logger=logging):
         self.logger = logger
         self.binded = False
@@ -306,7 +327,7 @@ class BaseModule(object):
             self.prepare(eval_batch, sparse_row_id_fn=sparse_row_id_fn)
             self.forward(eval_batch, is_train=False)
             pad = eval_batch.pad
-            outputs = [out[0:out.shape[0]-pad] for out in self.get_outputs()]
+            outputs = [out[0:out.shape[0] - pad] for out in self.get_outputs()]
 
             yield (outputs, nbatch, eval_batch)
 
@@ -370,7 +391,7 @@ class BaseModule(object):
             self.prepare(eval_batch, sparse_row_id_fn=sparse_row_id_fn)
             self.forward(eval_batch, is_train=False)
             pad = eval_batch.pad
-            outputs = [out[0:out.shape[0]-pad].copy() for out in self.get_outputs()]
+            outputs = [out[0:out.shape[0] - pad].copy() for out in self.get_outputs()]
 
             output_list.append(outputs)
 
@@ -381,8 +402,8 @@ class BaseModule(object):
             num_outputs = len(output_list[0])
             for out in output_list:
                 assert len(out) == num_outputs, \
-                       'Cannot merge batches, as num of outputs is not the same ' + \
-                       'in mini-batches. Maybe bucketing is used?'
+                    'Cannot merge batches, as num of outputs is not the same ' + \
+                    'in mini-batches. Maybe bucketing is used?'
             output_list2 = [ndarray.concatenate([out[i] for out in output_list])
                             for i in range(num_outputs)]
 
@@ -392,6 +413,37 @@ class BaseModule(object):
 
         return output_list
 
+    def evaluate_validation(self, roidb, config):
+        pdb_trace()
+
+        context = [mx.gpu(int(config.gpus[0]))]
+        sym_def = eval('{}.{}'.format(config.symbol, config.symbol))
+        sym_inst = sym_def(n_proposals=400, test_nbatch=1)
+        sym = sym_inst.get_symbol_rcnn(config, is_train=False)
+
+        for i, roidb in enumerate(roidbs):
+            roidb['flipped'] = False
+            roidb = [roidb]
+            val_iter = MNIteratorTest(roidb=roidb, config=config, batch_size=1, nGPUs=1, threads=1,
+                                       crop_size=None, test_scale=config.TEST.SCALES[0],
+                                       num_classes=db_info.num_classes)
+
+            shape_dict = dict(val_iter.provide_data_single)
+            sym_inst.infer_shape(shape_dict)
+
+            mod = mx.mod.Module(symbol=sym,
+                                context=context,
+                                data_names=[k[0] for k in val_iter.provide_data_single],
+                                label_names=None)
+            mod.bind(val_iter.provide_data, val_iter.provide_label, for_training=False)
+
+            model_prefix = os.path.join(config.output_path, args.save_prefix)
+            arg_params, aux_params = load_param(model_prefix, config.TEST.TEST_EPOCH,
+                                                convert=True, process=True)
+            mod.init_params(arg_params=arg_params, aux_params=aux_params)
+
+        return
+
     def fit(self, train_data, eval_data=None, eval_metric='acc',
             epoch_end_callback=None, batch_end_callback=None, kvstore='local',
             optimizer='sgd', optimizer_params=(('learning_rate', 0.01),),
@@ -399,7 +451,7 @@ class BaseModule(object):
             eval_batch_end_callback=None, initializer=Uniform(0.01),
             arg_params=None, aux_params=None, allow_missing=False,
             force_rebind=False, force_init=False, begin_epoch=0, num_epoch=None,
-            validation_metric=None, monitor=None, sparse_row_id_fn=None):
+            validation_metric=None, monitor=None, sparse_row_id_fn=None, valid_roidb=None, config=None):
         """Trains the module parameters.
 
         Checkout `Module Tutorial <http://mxnet.io/tutorials/basic/module.html>`_ to see
@@ -478,6 +530,7 @@ class BaseModule(object):
         ...     arg_params=arg_params, aux_params=aux_params,
         ...     eval_metric='acc', num_epoch=10, begin_epoch=3)
         """
+
         assert num_epoch is not None, 'please specify number of epochs'
 
         self.bind(data_shapes=train_data.provide_data, label_shapes=train_data.provide_label,
@@ -494,16 +547,25 @@ class BaseModule(object):
         if not isinstance(eval_metric, metric.EvalMetric):
             eval_metric = metric.create(eval_metric)
 
+        #sym_def = eval('{}.{}'.format(config.symbol, config.symbol))
+        #sym_inst = sym_def(n_proposals=400, test_nbatch=1)
+        #sym = sym_inst.get_symbol_rcnn(config, is_train=False)
+        #context = [mx.gpu(int(config.gpus[0]))]
+        #pdb.set_trace()
+
+
         ################################################################################
         # training loop
         ################################################################################
         for epoch in range(begin_epoch, num_epoch):
+            #validate.evaluate_validation(valid_roidb, config, epoch)
             tic = time.time()
             eval_metric.reset()
             nbatch = 0
             data_iter = iter(train_data)
             end_of_batch = False
             next_data_batch = next(data_iter)
+            pdb.set_trace()
             while not end_of_batch:
                 data_batch = next_data_batch
                 if monitor is not None:
@@ -533,11 +595,12 @@ class BaseModule(object):
                         callback(batch_end_params)
                 nbatch += 1
 
+
             # one epoch of training is finished
             for name, val in eval_name_vals:
                 self.logger.info('Epoch[%d] Train-%s=%f', epoch, name, val)
             toc = time.time()
-            self.logger.info('Epoch[%d] Time cost=%.3f', epoch, (toc-tic))
+            self.logger.info('Epoch[%d] Time cost=%.3f', epoch, (toc - tic))
 
             # sync aux params across devices
             arg_params, aux_params = self.get_params()
@@ -547,13 +610,16 @@ class BaseModule(object):
                 for callback in _as_list(epoch_end_callback):
                     callback(epoch, self.symbol, arg_params, aux_params)
 
-            #----------------------------------------
+            # ----------------------------------------
             # evaluation on validation set
+            # import pdb; pdb.set_trace()
+            if valid_roidb != None:
+                validate.evaluate_validation(valid_roidb, config, epoch)
             if eval_data:
                 res = self.score(eval_data, validation_metric,
                                  score_end_callback=eval_end_callback,
                                  batch_end_callback=eval_batch_end_callback, epoch=epoch)
-                #TODO: pull this into default
+                # TODO: pull this into default
                 for name, val in res:
                     self.logger.info('Epoch[%d] Validation-%s=%f', epoch, name, val)
 
@@ -692,8 +758,8 @@ class BaseModule(object):
         >>> mod.save_params('myfile')
         """
         arg_params, aux_params = self.get_params()
-        save_dict = {('arg:%s' % k) : v.as_in_context(cpu()) for k, v in arg_params.items()}
-        save_dict.update({('aux:%s' % k) : v.as_in_context(cpu()) for k, v in aux_params.items()})
+        save_dict = {('arg:%s' % k): v.as_in_context(cpu()) for k, v in arg_params.items()}
+        save_dict.update({('aux:%s' % k): v.as_in_context(cpu()) for k, v in aux_params.items()})
         ndarray.save(fname, save_dict)
 
     def load_params(self, fname):
@@ -794,6 +860,7 @@ class BaseModule(object):
         '''
         if sparse_row_id_fn is not None:
             warnings.warn(UserWarning("sparse_row_id_fn is not invoked for BaseModule."))
+
     # pylint: enable=unused-argument
 
     def forward(self, data_batch, is_train=None):
